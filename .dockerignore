@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+dist
+build
+*.egg
+.pytest_cache
+.coverage
+htmlcov
+
+# Virtual environments
+venv
+env
+ENV
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+flight_results.json
+
+# Tests
+tests
+pytest.ini
+tox.ini
+
+# Documentation
+*.md
+!README.md
+
+# Scripts desnecessários
+*.ps1
+*.sh
+test_*.py
+monitor_flights.py
+
+# Configs desnecessários
+*.service
+nginx-*.conf
+docker-compose*.yml
+requirements_api.txt
+api_client.html
