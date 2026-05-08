@@ -27,7 +27,7 @@ class SearchFlights:
     parsing the results into structured data models.
     """
 
-    BASE_URL = "https://www.google.com/_/FlightsFrontendUi/data/travel.frontend.flights.FlightsFrontendService/GetShoppingResults"
+    BASE_URL = "https://www.google.com/_/FlightsFrontendUi/data/travel.frontend.flights.FlightsFrontendService/GetShoppingResults?hl=pt-BR&gl=BR&currency=BRL"
     DEFAULT_HEADERS = {
         "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
     }

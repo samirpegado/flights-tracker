@@ -8,6 +8,7 @@ This module provides a robust HTTP client that handles:
 - Error handling
 """
 
+import os
 from typing import Any
 
 from curl_cffi import requests
@@ -28,6 +29,15 @@ class Client:
         """Initialize a new client session with default headers."""
         self._client = requests.Session()
         self._client.headers.update(self.DEFAULT_HEADERS)
+
+        # Configura proxy se definido via variável de ambiente
+        # Exemplos:
+        #   PROXY_URL=socks5://user:pass@host:port
+        #   PROXY_URL=http://user:pass@host:port
+        proxy_url = os.getenv("PROXY_URL")
+        if proxy_url:
+            self._client.proxies = {"http": proxy_url, "https": proxy_url}
+            print(f"🌐 Proxy configurado: {proxy_url.split('@')[-1]}")  # oculta credenciais no log
 
     def __del__(self):
         """Clean up client session on deletion."""
