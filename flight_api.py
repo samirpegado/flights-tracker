@@ -251,6 +251,7 @@ async def search_flights(request: SearchRequest, _: None = Security(verify_api_k
 
     Busca voos de ida para: departDate-1, departDate, departDate+1
     Busca voos de volta para: returnDate-1, returnDate, returnDate+1 (se fornecido)
+    Preços retornados em BRL (mercado brasileiro).
     """
     # Valida aeroportos
     origin = parse_airport(request.from_airport)
