@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copiar arquivos de dependências
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY fli ./fli
 
 # Instalar dependências Python
