@@ -7,7 +7,7 @@ Endpoints:
 """
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -218,19 +218,15 @@ def search_flights_for_date(
         return []
 
 
-def get_date_range(base_date: str) -> list[str]:
-    """Retorna lista de datas: base_date-1, base_date, base_date+1."""
+def validate_date(date: str) -> str:
+    """Valida o formato da data e retorna a própria data."""
     try:
-        base = datetime.strptime(base_date, "%Y-%m-%d")
-        return [
-            (base - timedelta(days=1)).strftime("%Y-%m-%d"),
-            base.strftime("%Y-%m-%d"),
-            (base + timedelta(days=1)).strftime("%Y-%m-%d"),
-        ]
+        datetime.strptime(date, "%Y-%m-%d")
+        return date
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=f"Data inválida: '{base_date}'. Use o formato YYYY-MM-DD.",
+            detail=f"Data inválida: '{date}'. Use o formato YYYY-MM-DD.",
         )
 
 
@@ -247,10 +243,10 @@ async def health_check():
 @app.post("/search", response_model=SearchResponse)
 async def search_flights(request: SearchRequest, _: None = Security(verify_api_key)):
     """
-    Busca voos de ida e volta com flexibilidade de datas.
+    Busca voos de ida e volta nas datas exatas informadas.
 
-    Busca voos de ida para: departDate-1, departDate, departDate+1
-    Busca voos de volta para: returnDate-1, returnDate, returnDate+1 (se fornecido)
+    Busca voos de ida para: departDate
+    Busca voos de volta para: returnDate (se fornecido)
     Preços retornados em BRL (mercado brasileiro).
     """
     # Valida aeroportos
@@ -261,48 +257,44 @@ async def search_flights(request: SearchRequest, _: None = Security(verify_api_k
     seat_type = parse_seat_type(request.cabin_class)
     max_stops = parse_max_stops(request.max_stops)
 
-    # Gera datas de busca
-    outbound_dates = get_date_range(request.depart_date)
-    return_dates = get_date_range(request.return_date) if request.return_date else None
+    # Valida datas
+    depart_date = validate_date(request.depart_date)
+    return_date = validate_date(request.return_date) if request.return_date else None
 
     print(f"\n🔍 Buscando voos {request.from_airport} → {request.to_airport}")
-    print(f"📅 Datas de ida: {outbound_dates}")
-    if return_dates:
-        print(f"📅 Datas de volta: {return_dates}")
+    print(f"📅 Data de ida: {depart_date}")
+    if return_date:
+        print(f"📅 Data de volta: {return_date}")
 
     # Busca voos de ida
-    outbound_results = []
-    for date in outbound_dates:
-        print(f"\n🛫 Buscando voos de ida para {date}...")
-        flights = search_flights_for_date(
-            origin=origin,
-            destination=destination,
-            date=date,
+    print(f"\n🛫 Buscando voos de ida para {depart_date}...")
+    outbound_flights = search_flights_for_date(
+        origin=origin,
+        destination=destination,
+        date=depart_date,
+        seat_type=seat_type,
+        max_stops=max_stops,
+        passengers=request.passengers,
+        top_n=5,
+    )
+    outbound_results = [SearchResultResponse(date=depart_date, flights=outbound_flights)]
+    print(f"   ✅ Encontrados {len(outbound_flights)} voos")
+
+    # Busca voos de volta (se fornecido)
+    return_results = None
+    if return_date:
+        print(f"\n🛬 Buscando voos de volta para {return_date}...")
+        return_flights = search_flights_for_date(
+            origin=destination,
+            destination=origin,
+            date=return_date,
             seat_type=seat_type,
             max_stops=max_stops,
             passengers=request.passengers,
             top_n=5,
         )
-        outbound_results.append(SearchResultResponse(date=date, flights=flights))
-        print(f"   ✅ Encontrados {len(flights)} voos")
-
-    # Busca voos de volta (se fornecido)
-    return_results = None
-    if return_dates:
-        return_results = []
-        for date in return_dates:
-            print(f"\n🛬 Buscando voos de volta para {date}...")
-            flights = search_flights_for_date(
-                origin=destination,
-                destination=origin,
-                date=date,
-                seat_type=seat_type,
-                max_stops=max_stops,
-                passengers=request.passengers,
-                top_n=5,
-            )
-            return_results.append(SearchResultResponse(date=date, flights=flights))
-            print(f"   ✅ Encontrados {len(flights)} voos")
+        return_results = [SearchResultResponse(date=return_date, flights=return_flights)]
+        print(f"   ✅ Encontrados {len(return_flights)} voos")
 
     # Calcula total de resultados
     total_outbound = sum(len(r.flights) for r in outbound_results)
