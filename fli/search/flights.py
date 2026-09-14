@@ -16,8 +16,9 @@ from fli.models import (
     FlightResult,
     FlightSearchFilters,
 )
-from fli.models.google_flights.base import TripType
+from fli.models.google_flights.base import MaxStops, TripType
 from fli.search.client import get_client
+from fli.search.browser import search_shopping_in_browser
 
 
 class SearchFlights:
@@ -64,23 +65,43 @@ class SearchFlights:
             response = self.client.post(
                 url=self.BASE_URL,
                 data=f"f.req={encoded_filters}",
-                impersonate="chrome",
                 allow_redirects=True,
             )
             response.raise_for_status()
 
             parsed = json.loads(response.text.lstrip(")]}'"))[0][2]
-            if not parsed:
-                return None
-
-            encoded_filters = json.loads(parsed)
-            flights_data = [
-                item
-                for i in [2, 3]
-                if isinstance(encoded_filters[i], list)
-                for item in encoded_filters[i][0]
-            ]
-            flights = [self._parse_flights_data(flight) for flight in flights_data]
+            if parsed:
+                encoded_filters = json.loads(parsed)
+            else:
+                print("Google Flights RPC vazia; tentando fallback no browser.")
+                encoded_filters = search_shopping_in_browser(filters)
+                if not encoded_filters:
+                    return None
+            if isinstance(encoded_filters, dict) and "__dom_flights__" in encoded_filters:
+                flights = encoded_filters["__dom_flights__"]
+            else:
+                flights_data = [
+                    item
+                    for i in [2, 3]
+                    if isinstance(encoded_filters[i], list)
+                    for item in encoded_filters[i][0]
+                ]
+                flights = [self._parse_flights_data(flight) for flight in flights_data]
+            if filters.stops == MaxStops.NON_STOP:
+                flights = [f for f in flights if f.stops == 0]
+            elif filters.stops == MaxStops.ONE_STOP_OR_FEWER:
+                flights = [f for f in flights if f.stops <= 1]
+            elif filters.stops == MaxStops.TWO_OR_FEWER_STOPS:
+                flights = [f for f in flights if f.stops <= 2]
+            if filters.max_duration:
+                flights = [f for f in flights if f.duration <= filters.max_duration]
+            if filters.airlines:
+                allowed = {airline.name for airline in filters.airlines}
+                flights = [
+                    f
+                    for f in flights
+                    if any(leg.airline.name in allowed for leg in f.legs)
+                ]
 
             if filters.trip_type == TripType.ONE_WAY:
                 return flights

@@ -245,6 +245,7 @@ def scan_travel(
     if window_start and window_end:
         start = datetime.strptime(str(window_start), "%Y-%m-%d")
         end = datetime.strptime(str(window_end), "%Y-%m-%d")
+        used_calendar = False
         try:
             out_cal = search_calendar(
                 origin, destination, str(window_start), str(window_end),
@@ -255,19 +256,23 @@ def scan_travel(
                 return_from, return_to, str(window_start), str(window_end),
                 seat_type, ret_stops, passengers, ret_airlines,
             )
-            out_dates = [row["date"] for row in out_cal]
-            ret_dates = [row["date"] for row in ret_cal]
-            pairs = _valid_pairs(
-                out_dates,
-                ret_dates,
-                {row["date"]: row["price"] for row in out_cal},
-                {row["date"]: row["price"] for row in ret_cal},
-                duration_min,
-                duration_max,
-            )
-            dates_scanned = len(set(out_dates + ret_dates))
+            if out_cal and ret_cal:
+                out_dates = [row["date"] for row in out_cal]
+                ret_dates = [row["date"] for row in ret_cal]
+                pairs = _valid_pairs(
+                    out_dates,
+                    ret_dates,
+                    {row["date"]: row["price"] for row in out_cal},
+                    {row["date"]: row["price"] for row in ret_cal},
+                    duration_min,
+                    duration_max,
+                )
+                dates_scanned = len(set(out_dates + ret_dates))
+                used_calendar = bool(pairs)
         except Exception as exc:
             print(f"Calendário falhou, usando amostragem: {exc}")
+        if not used_calendar:
+            print("Calendário vazio; amostrando datas da janela.")
             sampled = _sample_dates(start, end)
             pairs = _valid_pairs(
                 sampled, sampled, {}, {}, duration_min, duration_max

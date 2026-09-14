@@ -44,6 +44,8 @@ htmlcov/
 *.log
 flight_results.json
 api_test_result.json
+_last_google_flights.txt
+_tmp_*.py
 
 # OS
 .DS_Store

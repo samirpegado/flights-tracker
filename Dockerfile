@@ -19,12 +19,12 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY fli ./fli
 
-# Instalar dependências Python
-RUN pip install --no-cache-dir -e . && \
-    pip install --no-cache-dir fastapi "uvicorn[standard]"
+# Instalar dependências Python e Chromium (fallback do Google Flights)
+RUN pip install --no-cache-dir -e ".[mcp]" python-dotenv && \
+    playwright install --with-deps chromium
 
 # Copiar código da aplicação
-COPY flight_api.py ./
+COPY flight_api.py agent_scan.py gemini_agent.py flight_score.py ./
 
 # Expor porta
 EXPOSE 8000

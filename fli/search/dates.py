@@ -119,7 +119,6 @@ class SearchDates:
             response = self.client.post(
                 url=self.BASE_URL,
                 data=f"f.req={encoded_filters}",
-                impersonate="chrome",
                 allow_redirects=True,
             )
             response.raise_for_status()
