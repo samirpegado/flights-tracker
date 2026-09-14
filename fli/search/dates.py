@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from fli.core import extract_currency_from_price_token
 from fli.models import DateSearchFilters
 from fli.models.google_flights.base import TripType
-from fli.search.client import get_client
+from fli.search.client import CALENDAR_RPC_URL, get_client
 
 
 class DatePrice(BaseModel):
@@ -31,7 +31,7 @@ class SearchDates:
     useful for finding the cheapest dates to fly.
     """
 
-    BASE_URL = "https://www.google.com/_/FlightsFrontendUi/data/travel.frontend.flights.FlightsFrontendService/GetCalendarGraph"
+    BASE_URL = CALENDAR_RPC_URL
     DEFAULT_HEADERS = {
         "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
     }

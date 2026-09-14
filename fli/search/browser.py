@@ -8,13 +8,13 @@ import os
 import re
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from fli.models import Airline, Airport, FlightLeg, FlightResult
+from fli.search.client import FLIGHTS_HOME, FLIGHTS_SEARCH, brazil_cookies, brazil_search_qs
 
 if TYPE_CHECKING:
     from fli.models import FlightSearchFilters
-
-FLIGHTS_SEARCH = "https://www.google.com/travel/flights/search"
 
 AIRLINE_ALIASES = (
     ("TAP Air Portugal", "TP"),
@@ -35,15 +35,33 @@ AIRLINE_ALIASES = (
 )
 
 CARD_RE = re.compile(
-    r"(?P<dep>\d{1,2}:\d{2})\s*[–\-]\s*(?P<arr>\d{1,2}:\d{2})(?P<plus>\+\d+)?"
+    r"(?P<dep>\d{1,2}:\d{2})\s*(?:AM|PM)?\s*[–\-]\s*(?P<arr>\d{1,2}:\d{2})\s*(?:AM|PM)?(?P<plus>\+\d+)?"
     r"\s*(?P<carriers>.*?)"
-    r"(?P<hours>\d+)\s*h(?:oras?)?\s*(?:(?P<mins>\d+)\s*min)?"
+    r"(?P<hours>\d+)\s*(?:hrs?|h(?:oras?)?|std\.?)\s*(?:(?P<mins>\d+)\s*(?:mins?|min\.?)?)?"
     r"\s*[A-Z]{3}\s*[–\-]\s*[A-Z]{3}"
-    r"\s*(?P<stopstext>Sem escalas|\d+\s*paradas?)"
+    r"\s*(?P<stopstext>Sem escalas|Non-?stop|Direkt(?:flug)?|Ohne Zwischenstopp|"
+    r"\d+\s*(?:paradas?|stops?|Zwischenstopps?))"
     r".{0,500}?"
-    r"R\$\s*(?P<price>[\d\.]+)",
+    r"(?P<currencysym>R\$|€|EUR|US\$|\$)\s*(?P<price>[\d\.\,]+)",
     re.IGNORECASE | re.DOTALL,
 )
+
+CONSENT_BUTTONS = (
+    "Aceitar tudo",
+    "Accept all",
+    "I agree",
+    "Alle akzeptieren",
+    "Einverstanden",
+    "Aceptar todo",
+)
+
+CURRENCY_FROM_SYMBOL = {
+    "R$": "BRL",
+    "€": "EUR",
+    "EUR": "EUR",
+    "US$": "USD",
+    "$": "USD",
+}
 
 
 def build_one_way_tfs(origin: str, destination: str, date: str, adults: int = 1) -> str:
@@ -80,11 +98,30 @@ def build_one_way_tfs(origin: str, destination: str, date: str, adults: int = 1)
 
 
 def _airline_code(carriers: str) -> str | None:
-    cleaned = re.split(r"Operado por", carriers, maxsplit=1, flags=re.I)[0]
+    cleaned = re.split(r"Operado por|Operated by|Betrieben von", carriers, maxsplit=1, flags=re.I)[0]
     for label, code in AIRLINE_ALIASES:
         if re.search(re.escape(label), cleaned, re.I):
             return code
     return None
+
+
+def _parse_price(raw: str) -> float:
+    text = raw.strip()
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            return float(text.replace(".", "").replace(",", "."))
+        return float(text.replace(",", ""))
+    if "," in text:
+        decimals = text.split(",")[-1]
+        if len(decimals) == 2:
+            return float(text.replace(".", "").replace(",", "."))
+        return float(text.replace(",", ""))
+    if "." in text:
+        decimals = text.split(".")[-1]
+        if len(decimals) == 3:
+            return float(text.replace(".", ""))
+        return float(text)
+    return float(text)
 
 
 def parse_visible_flights(
@@ -98,12 +135,11 @@ def parse_visible_flights(
     seen: set[tuple] = set()
 
     for match in CARD_RE.finditer(text):
-        price_raw = match.group("price").replace(".", "")
         try:
-            price = float(price_raw)
+            price = _parse_price(match.group("price"))
         except ValueError:
             continue
-        if price < 100:
+        if price < 50:
             continue
         airline_code = _airline_code(match.group("carriers"))
         if not airline_code:
@@ -115,11 +151,16 @@ def parse_visible_flights(
 
         duration = int(match.group("hours")) * 60 + int(match.group("mins") or 0)
         stopstext = match.group("stopstext")
-        if re.search(r"Sem escalas", stopstext, re.I):
+        if re.search(r"Sem escalas|Non-?stop|Direkt|Ohne Zwischenstopp", stopstext, re.I):
             stops = 0
         else:
             stops_m = re.search(r"(\d+)", stopstext)
             stops = int(stops_m.group(1)) if stops_m else 1
+        currency = CURRENCY_FROM_SYMBOL.get(match.group("currencysym").upper(), "BRL")
+        if match.group("currencysym") in {"R$"}:
+            currency = "BRL"
+        elif match.group("currencysym") in {"€", "EUR"}:
+            currency = "EUR"
 
         dep_h, dep_min = (int(part) for part in match.group("dep").split(":"))
         arr_h, arr_min = (int(part) for part in match.group("arr").split(":"))
@@ -138,7 +179,7 @@ def parse_visible_flights(
         results.append(
             FlightResult(
                 price=price,
-                currency="BRL",
+                currency=currency,
                 duration=duration,
                 stops=stops,
                 legs=[
@@ -169,6 +210,60 @@ def _parse_rpc_text(text: str) -> Any | None:
         return None
 
 
+def _playwright_proxy() -> dict[str, str] | None:
+    raw = os.getenv("PROXY_URL") or ""
+    if not raw.strip():
+        return None
+    parsed = urlparse(raw)
+    if not parsed.hostname:
+        return None
+    scheme = parsed.scheme or "http"
+    port = parsed.port or (443 if scheme == "https" else 80)
+    proxy: dict[str, str] = {"server": f"{scheme}://{parsed.hostname}:{port}"}
+    if parsed.username:
+        proxy["username"] = parsed.username
+        proxy["password"] = parsed.password or ""
+    return proxy
+
+
+def _chromium_args() -> list[str]:
+    return [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--window-size=1400,900",
+    ]
+
+
+def _dismiss_consent(page) -> None:
+    """Click through the EU Google consent interstitial if it appears."""
+    for frame in [page, *page.frames]:
+        try:
+            btn = frame.locator("#L2AGLb")
+            if btn.count():
+                btn.first.click(timeout=1500)
+                page.wait_for_timeout(800)
+                return
+        except Exception:
+            pass
+        for label in CONSENT_BUTTONS:
+            try:
+                frame.get_by_role("button", name=re.compile(rf"^{re.escape(label)}$", re.I)).first.click(
+                    timeout=1200
+                )
+                page.wait_for_timeout(800)
+                return
+            except Exception:
+                continue
+
+
+def _page_snippet(visible: str, title: str) -> str:
+    collapsed = re.sub(r"\s+", " ", visible or "").strip()
+    return f"title={title!r} chars={len(visible or '')} snippet={collapsed[:220]!r}"
+
+
 def search_shopping_in_browser(filters: FlightSearchFilters) -> list | None:
     """Open Google Flights in Chromium and reuse GetShoppingResults from the page."""
     origin = filters.flight_segments[0].departure_airport[0][0].name
@@ -180,7 +275,7 @@ def search_shopping_in_browser(filters: FlightSearchFilters) -> list | None:
     with ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(
             _search_shopping_sync, origin, destination, date, adults
-        ).result(timeout=90)
+        ).result(timeout=120)
 
 
 def _search_shopping_sync(
@@ -194,9 +289,10 @@ def _search_shopping_sync(
         return None
 
     tfs = build_one_way_tfs(origin, destination, date, adults)
-    url = f"{FLIGHTS_SEARCH}?hl=pt-BR&gl=BR&curr=BRL&tfs={tfs}"
+    url = f"{FLIGHTS_SEARCH}?{brazil_search_qs()}&tfs={tfs}"
     payloads: list[str] = []
     visible = ""
+    title = ""
 
     def on_response(response) -> None:
         if "GetShoppingResults" not in response.url:
@@ -211,23 +307,52 @@ def _search_shopping_sync(
     try:
         with sync_playwright() as playwright:
             headed = os.getenv("GOOGLE_FLIGHTS_HEADED", "").lower() in {"1", "true", "yes"}
-            launch_kwargs = {"headless": not headed}
-            try:
-                browser = playwright.chromium.launch(channel="chrome", **launch_kwargs)
-            except Exception:
+            launch_kwargs: dict[str, Any] = {
+                "headless": not headed,
+                "args": _chromium_args(),
+            }
+            proxy = _playwright_proxy()
+            if proxy:
+                launch_kwargs["proxy"] = proxy
+                print("Playwright usando PROXY_URL.")
+            in_docker = os.path.exists("/.dockerenv")
+            browser = None
+            if not in_docker:
+                try:
+                    browser = playwright.chromium.launch(channel="chrome", **launch_kwargs)
+                except Exception:
+                    browser = None
+            if browser is None:
                 browser = playwright.chromium.launch(**launch_kwargs)
             context = browser.new_context(
                 locale="pt-BR",
                 timezone_id="America/Recife",
-                extra_http_headers={"accept-language": "pt-BR,pt;q=0.9"},
+                geolocation={"latitude": -5.7945, "longitude": -35.211},
+                permissions=["geolocation"],
+                viewport={"width": 1400, "height": 900},
+                extra_http_headers={"accept-language": "pt-BR,pt;q=0.9,en;q=0.8"},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
             )
+            context.add_cookies(brazil_cookies())
             page = context.new_page()
             page.on("response", on_response)
+            page.goto(FLIGHTS_HOME, wait_until="domcontentloaded", timeout=45000)
+            _dismiss_consent(page)
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            _dismiss_consent(page)
             try:
                 page.wait_for_function(
-                    "() => (document.body?.innerText || '').includes('R$')",
-                    timeout=25000,
+                    """() => {
+                        const t = document.body?.innerText || '';
+                        return t.includes('R$') || t.includes('€')
+                            || /resultados encontrados/i.test(t)
+                            || /results found/i.test(t)
+                            || /ergebnisse/i.test(t);
+                    }""",
+                    timeout=28000,
                 )
             except Exception:
                 page.wait_for_timeout(8000)
@@ -238,6 +363,7 @@ def _search_shopping_sync(
                     browser.close()
                     return inner
             try:
+                title = page.title()
                 visible = page.inner_text("body")
             except Exception:
                 visible = ""
@@ -249,8 +375,16 @@ def _search_shopping_sync(
                 except Exception:
                     pass
             parsed_flights = parse_visible_flights(visible, origin, destination, date)
+            print(f"Fallback Playwright página: {_page_snippet(visible, title)}")
             browser.close()
             if parsed_flights:
+                currencies = {flight.currency for flight in parsed_flights}
+                if currencies - {"BRL"}:
+                    print(
+                        "Google serviu preços fora de BRL "
+                        f"({', '.join(sorted(currencies))}). "
+                        "Na Hetzner use PROXY_URL com IP do Brasil."
+                    )
                 return {"__dom_flights__": parsed_flights}
     except Exception as exc:
         print(f"Fallback Playwright falhou: {exc}")
@@ -258,7 +392,8 @@ def _search_shopping_sync(
 
     print(
         f"Fallback Playwright sem payload útil "
-        f"({len(payloads)} respostas, texto tem R$={'R$' in visible})."
+        f"({len(payloads)} respostas, texto tem R$={'R$' in visible}, "
+        f"tem €={'€' in visible})."
     )
     return None
 

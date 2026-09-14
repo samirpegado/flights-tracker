@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import os
 from typing import Any
+from urllib.parse import quote
 
 from curl_cffi import requests
 from ratelimit import limits, sleep_and_retry
@@ -11,11 +13,52 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 client = None
 
-FLIGHTS_HOME = "https://www.google.com/travel/flights?hl=pt-BR&gl=BR&curr=BRL"
+GOOGLE_HOST = "https://www.google.com.br"
+BRAZIL_LOCATION = "Natal,Rio Grande do Norte,Brazil"
 CHROME_IMPERSONATE = "chrome131"
 CONSENT_COOKIE = (
     "CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpd2ViXzIwMjQxMTEzLjA1X3AwGgJlbiACGgYI4LL5pwY"
 )
+
+
+def brazil_uule() -> str:
+    """Encode a Brazilian canonical location for Google's `uule` parameter."""
+    encoded = base64.b64encode(BRAZIL_LOCATION.encode("utf-8")).decode("ascii").rstrip("=")
+    return "w+CAIQICI" + encoded
+
+
+def brazil_search_qs() -> str:
+    """Query string that asks Google Flights for the Brazilian market."""
+    return f"hl=pt-BR&gl=BR&curr=BRL&uule={quote(brazil_uule(), safe='')}"
+
+
+FLIGHTS_HOME = f"{GOOGLE_HOST}/travel/flights?{brazil_search_qs()}"
+FLIGHTS_SEARCH = f"{GOOGLE_HOST}/travel/flights/search"
+SHOPPING_RPC_URL = (
+    f"{GOOGLE_HOST}/_/FlightsFrontendUi/data/travel.frontend.flights."
+    f"FlightsFrontendService/GetShoppingResults?{brazil_search_qs()}&currency=BRL"
+)
+CALENDAR_RPC_URL = (
+    f"{GOOGLE_HOST}/_/FlightsFrontendUi/data/travel.frontend.flights."
+    f"FlightsFrontendService/GetCalendarGraph?{brazil_search_qs()}&currency=BRL"
+)
+
+
+def brazil_cookies() -> list[dict[str, str]]:
+    """Cookies that signal Brazil + consent on both Google hosts."""
+    pref = "ID=0000000000000000:FF=0:LD=pt-BR:NW=1:TM=0:LM=0:CR=BR:S=BRL"
+    uule = brazil_uule()
+    cookies: list[dict[str, str]] = []
+    for domain in (".google.com.br", ".google.com"):
+        cookies.extend(
+            [
+                {"name": "SOCS", "value": CONSENT_COOKIE, "domain": domain, "path": "/"},
+                {"name": "CONSENT", "value": "YES+", "domain": domain, "path": "/"},
+                {"name": "PREF", "value": pref, "domain": domain, "path": "/"},
+                {"name": "UULE", "value": uule, "domain": domain, "path": "/"},
+            ]
+        )
+    return cookies
 
 
 class Client:
@@ -25,7 +68,7 @@ class Client:
         "accept": "*/*",
         "accept-language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
-        "origin": "https://www.google.com",
+        "origin": GOOGLE_HOST,
         "referer": FLIGHTS_HOME,
         "x-same-domain": "1",
     }
@@ -51,7 +94,12 @@ class Client:
         if self._warmed:
             return
         try:
-            self._client.cookies.set("SOCS", CONSENT_COOKIE, domain=".google.com")
+            for cookie in brazil_cookies():
+                self._client.cookies.set(
+                    cookie["name"],
+                    cookie["value"],
+                    domain=cookie["domain"],
+                )
             self._client.get(
                 FLIGHTS_HOME,
                 impersonate=CHROME_IMPERSONATE,

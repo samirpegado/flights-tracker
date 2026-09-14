@@ -17,7 +17,7 @@ from fli.models import (
     FlightSearchFilters,
 )
 from fli.models.google_flights.base import MaxStops, TripType
-from fli.search.client import get_client
+from fli.search.client import SHOPPING_RPC_URL, get_client
 from fli.search.browser import search_shopping_in_browser
 
 
@@ -28,7 +28,7 @@ class SearchFlights:
     parsing the results into structured data models.
     """
 
-    BASE_URL = "https://www.google.com/_/FlightsFrontendUi/data/travel.frontend.flights.FlightsFrontendService/GetShoppingResults?hl=pt-BR&gl=BR&currency=BRL"
+    BASE_URL = SHOPPING_RPC_URL
     DEFAULT_HEADERS = {
         "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
     }
