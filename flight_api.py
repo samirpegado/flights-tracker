@@ -476,7 +476,7 @@ async def agent_status():
     """Indica se o Gemini está configurado. Sem autenticação (só boolean)."""
     return {
         "gemini_configured": gemini_configured(),
-        "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        "model": os.getenv("GEMINI_MODEL", "gemini-flash-latest"),
     }
 
 
@@ -499,8 +499,11 @@ async def agent_scan(request: ScanTravelRequest, _: None = Security(verify_api_k
 
 
 if __name__ == "__main__":
+    import sys
     import uvicorn
-    import os
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     # Porta configurável via variável de ambiente (para Coolify)
     port = int(os.getenv("PORT", 8000))

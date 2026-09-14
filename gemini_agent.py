@@ -14,12 +14,23 @@ def _api_key() -> str:
 
 
 def _model() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    return os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
 
 def gemini_configured() -> bool:
     """Retorna True se a chave do Gemini estiver configurada."""
     return bool(_api_key())
+
+
+def _safe_error(exc: Exception) -> str:
+    """Remove chave e query string de erros HTTP antes de devolver ao cliente."""
+    text = str(exc)
+    key = _api_key()
+    if key:
+        text = text.replace(key, "***")
+    text = re.sub(r"key=[^&\s]+", "key=***", text)
+    text = re.sub(r"https?://\S+", "[url]", text)
+    return text[:300]
 
 
 def _extract_text(payload: dict[str, Any]) -> str:
@@ -37,9 +48,6 @@ def _generate(prompt: str, system: str, json_mode: bool = False) -> str:
     if not _api_key():
         raise RuntimeError("GEMINI_API_KEY não configurada")
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/{_model()}:generateContent"
-    )
     body: dict[str, Any] = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -51,14 +59,32 @@ def _generate(prompt: str, system: str, json_mode: bool = False) -> str:
     if json_mode:
         body["generationConfig"]["responseMimeType"] = "application/json"
 
+    models = []
+    for name in (_model(), "gemini-flash-latest", "gemini-3.6-flash"):
+        if name and name not in models:
+            models.append(name)
+
+    last_error: Exception | None = None
     with httpx.Client(timeout=60.0) as client:
-        response = client.post(
-            url,
-            params={"key": _api_key()},
-            json=body,
-        )
-        response.raise_for_status()
-        return _extract_text(response.json())
+        for model in models:
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            )
+            try:
+                response = client.post(
+                    url,
+                    headers={"x-goog-api-key": _api_key()},
+                    json=body,
+                )
+                if response.status_code == 404:
+                    last_error = RuntimeError(f"Modelo {model} indisponível")
+                    continue
+                response.raise_for_status()
+                return _extract_text(response.json())
+            except Exception as exc:
+                last_error = exc
+                continue
+    raise RuntimeError(_safe_error(last_error or RuntimeError("Falha no Gemini")))
 
 
 def fallback_policy(travel: dict[str, Any]) -> dict[str, Any]:
@@ -128,8 +154,8 @@ Preencha este JSON (use null quando não souber):
         merged = {**base, **{k: v for k, v in parsed.items() if v is not None}}
         return merged
     except Exception as exc:
-        print(f"Falha ao extrair política com Gemini: {exc}")
-        base["notes"] = f"Fallback sem Gemini: {exc}"
+        print(f"Falha ao extrair política com Gemini: {_safe_error(exc)}")
+        base["notes"] = "Política gerada sem Gemini; a extração automática falhou."
         return base
 
 
@@ -180,12 +206,12 @@ def write_briefing(
     try:
         return _generate(prompt, system, json_mode=False)
     except Exception as exc:
-        print(f"Falha ao gerar briefing com Gemini: {exc}")
+        print(f"Falha ao gerar briefing com Gemini: {_safe_error(exc)}")
         best = combinations[0]
         return (
             f"Melhor combinação de hoje: R$ {best.get('total_price'):.2f} "
             f"(ida {best.get('outbound_date')} / volta {best.get('return_date')}). "
-            f"Não consegui gerar o briefing da IA ({exc})."
+            "Não consegui gerar o briefing da IA."
         )
 
 
