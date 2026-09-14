@@ -16,18 +16,24 @@ from fastapi.security.api_key import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+load_dotenv()
+
 from fli.models import (
+    Airline,
     Airport,
+    DateSearchFilters,
     FlightSearchFilters,
     FlightSegment,
     MaxStops,
     PassengerInfo,
     SeatType,
     SortBy,
+    TripType,
 )
-from fli.search import SearchFlights
+from fli.search import SearchDates, SearchFlights
 
-load_dotenv()
+from agent_scan import scan_travel
+from gemini_agent import extract_policy, gemini_configured, parse_airlines_text
 
 API_KEY = os.getenv("APIKEY")
 api_key_header = APIKeyHeader(name="x-api-key")
@@ -45,11 +51,60 @@ class SearchRequest(BaseModel):
     return_date: Optional[str] = Field(
         None, alias="returnDate", description="Data de volta (YYYY-MM-DD)"
     )
+    return_from: Optional[str] = Field(
+        None, alias="returnFrom", description="Origem da volta (open-jaw)"
+    )
+    return_to: Optional[str] = Field(
+        None, alias="returnTo", description="Destino da volta (open-jaw)"
+    )
     cabin_class: str = Field(
         "ECONOMY", description="Classe da cabine (ECONOMY, BUSINESS, FIRST)"
     )
     max_stops: str = Field("ANY", description="Máximo de paradas (ANY, NON_STOP, ONE_STOP_OR_FEWER)")
+    return_max_stops: Optional[str] = Field(
+        None, alias="returnMaxStops", description="Máximo de paradas só na volta"
+    )
     passengers: int = Field(1, description="Número de passageiros")
+    airlines: Optional[list[str]] = Field(None, description="Filtro de companhias (IATA)")
+
+
+class OneWayRequest(BaseModel):
+    """Busca de um único trecho."""
+
+    from_airport: str = Field(..., alias="from")
+    to_airport: str = Field(..., alias="to")
+    date: str
+    cabin_class: str = Field("ECONOMY", alias="cabinClass")
+    max_stops: str = Field("ANY", alias="maxStops")
+    passengers: int = 1
+    airlines: Optional[list[str]] = None
+
+
+class CalendarRequest(BaseModel):
+    """Busca de preços por data."""
+
+    from_airport: str = Field(..., alias="from")
+    to_airport: str = Field(..., alias="to")
+    from_date: str = Field(..., alias="fromDate")
+    to_date: str = Field(..., alias="toDate")
+    cabin_class: str = Field("ECONOMY", alias="cabinClass")
+    max_stops: str = Field("ANY", alias="maxStops")
+    passengers: int = 1
+    airlines: Optional[list[str]] = None
+
+
+class ExtractPolicyRequest(BaseModel):
+    """Extrai regras do contexto da viagem."""
+
+    context: str = ""
+    travel: dict
+
+
+class ScanTravelRequest(BaseModel):
+    """Roda o monitor de uma viagem."""
+
+    travel: dict
+    previous_best_price: Optional[float] = None
 
 
 class FlightLegResponse(BaseModel):
@@ -150,12 +205,29 @@ def parse_max_stops(max_stops: str) -> MaxStops:
     mapping = {
         "ANY": MaxStops.ANY,
         "NON_STOP": MaxStops.NON_STOP,
+        "0": MaxStops.NON_STOP,
+        "DIRETO": MaxStops.NON_STOP,
         "ONE_STOP": MaxStops.ONE_STOP_OR_FEWER,
         "ONE_STOP_OR_FEWER": MaxStops.ONE_STOP_OR_FEWER,
+        "1": MaxStops.ONE_STOP_OR_FEWER,
         "TWO_PLUS_STOPS": MaxStops.TWO_OR_FEWER_STOPS,
         "TWO_OR_FEWER_STOPS": MaxStops.TWO_OR_FEWER_STOPS,
+        "2": MaxStops.TWO_OR_FEWER_STOPS,
     }
     return mapping.get(max_stops.upper(), MaxStops.ANY)
+
+
+def parse_airlines(codes: Optional[list[str]]) -> Optional[list[Airline]]:
+    """Converte códigos IATA em enums Airline."""
+    if not codes:
+        return None
+    airlines = []
+    for code in parse_airlines_text(codes):
+        try:
+            airlines.append(getattr(Airline, code))
+        except AttributeError:
+            continue
+    return airlines or None
 
 
 def format_flight_response(flight) -> FlightResponse:
@@ -188,6 +260,7 @@ def search_flights_for_date(
     max_stops: MaxStops,
     passengers: int,
     top_n: int = 5,
+    airlines: Optional[list[Airline]] = None,
 ) -> list[FlightResponse]:
     """Busca voos para uma data específica."""
     try:
@@ -203,6 +276,7 @@ def search_flights_for_date(
             seat_type=seat_type,
             stops=max_stops,
             sort_by=SortBy.CHEAPEST,
+            airlines=airlines,
         )
 
         search = SearchFlights()
@@ -283,15 +357,25 @@ async def search_flights(request: SearchRequest, _: None = Security(verify_api_k
     # Busca voos de volta (se fornecido)
     return_results = None
     if return_date:
+        return_origin = parse_airport(request.return_from) if request.return_from else destination
+        return_destination = parse_airport(request.return_to) if request.return_to else origin
+        return_stops = (
+            parse_max_stops(request.return_max_stops)
+            if request.return_max_stops
+            else max_stops
+        )
+        return_airlines = parse_airlines(request.airlines) if request.return_from else None
         print(f"\n🛬 Buscando voos de volta para {return_date}...")
+        print(f"   {request.return_from or request.to_airport} → {request.return_to or request.from_airport}")
         return_flights = search_flights_for_date(
-            origin=destination,
-            destination=origin,
+            origin=return_origin,
+            destination=return_destination,
             date=return_date,
             seat_type=seat_type,
-            max_stops=max_stops,
+            max_stops=return_stops,
             passengers=request.passengers,
             top_n=5,
+            airlines=return_airlines,
         )
         return_results = [SearchResultResponse(date=return_date, flights=return_flights)]
         print(f"   ✅ Encontrados {len(return_flights)} voos")
@@ -311,12 +395,107 @@ async def search_flights(request: SearchRequest, _: None = Security(verify_api_k
             "to": request.to_airport,
             "departDate": request.depart_date,
             "returnDate": request.return_date,
+            "returnFrom": request.return_from,
+            "returnTo": request.return_to,
             "cabinClass": request.cabin_class,
             "maxStops": request.max_stops,
+            "returnMaxStops": request.return_max_stops,
             "passengers": request.passengers,
         },
         total_results=total_results,
     )
+
+
+@app.post("/search/one-way")
+async def search_one_way_endpoint(request: OneWayRequest, _: None = Security(verify_api_key)):
+    """Busca um único trecho (ida ou volta)."""
+    origin = parse_airport(request.from_airport)
+    destination = parse_airport(request.to_airport)
+    date = validate_date(request.date)
+    flights = search_flights_for_date(
+        origin=origin,
+        destination=destination,
+        date=date,
+        seat_type=parse_seat_type(request.cabin_class),
+        max_stops=parse_max_stops(request.max_stops),
+        passengers=request.passengers,
+        airlines=parse_airlines(request.airlines),
+        top_n=8,
+    )
+    return {
+        "date": date,
+        "flights": flights,
+        "search_params": request.model_dump(by_alias=True),
+        "total_results": len(flights),
+    }
+
+
+@app.post("/search/calendar")
+async def search_calendar_endpoint(request: CalendarRequest, _: None = Security(verify_api_key)):
+    """Varre preços por data em um período (one-way)."""
+    origin = parse_airport(request.from_airport)
+    destination = parse_airport(request.to_airport)
+    from_date = validate_date(request.from_date)
+    to_date = validate_date(request.to_date)
+    try:
+        filters = DateSearchFilters(
+            trip_type=TripType.ONE_WAY,
+            passenger_info=PassengerInfo(adults=request.passengers),
+            flight_segments=[
+                FlightSegment(
+                    departure_airport=[[origin, 0]],
+                    arrival_airport=[[destination, 0]],
+                    travel_date=from_date,
+                )
+            ],
+            seat_type=parse_seat_type(request.cabin_class),
+            stops=parse_max_stops(request.max_stops),
+            airlines=parse_airlines(request.airlines),
+            from_date=from_date,
+            to_date=to_date,
+        )
+        results = SearchDates().search(filters) or []
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha no calendário: {exc}") from exc
+
+    dates = []
+    for item in results:
+        raw_date = item.date[0] if isinstance(item.date, tuple) else item.date
+        dates.append(
+            {
+                "date": raw_date.strftime("%Y-%m-%d"),
+                "price": item.price,
+                "currency": item.currency,
+            }
+        )
+    return {"dates": dates, "total_results": len(dates)}
+
+
+@app.get("/agent/status")
+async def agent_status():
+    """Indica se o Gemini está configurado. Sem autenticação (só boolean)."""
+    return {
+        "gemini_configured": gemini_configured(),
+        "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+    }
+
+
+@app.post("/agent/extract-policy")
+async def agent_extract_policy(request: ExtractPolicyRequest, _: None = Security(verify_api_key)):
+    """Lê o contexto da viagem e devolve regras estruturadas."""
+    policy = extract_policy(request.context, request.travel)
+    return {"policy": policy, "gemini_configured": gemini_configured()}
+
+
+@app.post("/agent/scan")
+async def agent_scan(request: ScanTravelRequest, _: None = Security(verify_api_key)):
+    """Calendário + buscas one-way + score + briefing Gemini."""
+    try:
+        return scan_travel(request.travel, request.previous_best_price)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Falha no monitor: {exc}") from exc
 
 
 if __name__ == "__main__":

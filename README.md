@@ -62,10 +62,16 @@ Documentação interativa disponível em `http://localhost:8000/docs`.
 
 ## Variáveis de ambiente
 
+Copie `.env.example` para `.env` na pasta `flights-tracker`.
+
 | Variável | Descrição |
 |----------|-----------|
 | `APIKEY` | Chave de autenticação da API |
 | `PORT` | Porta do servidor (padrão: `8000`) |
+| `GEMINI_API_KEY` | Chave do Gemini (Google AI Studio). **Não** colocar no front. |
+| `GEMINI_MODEL` | Modelo (padrão: `gemini-2.5-flash`) |
+
+A chave do Gemini vai **somente** no `.env` desta API e nas variáveis de ambiente do host (Coolify). As Edge Functions do Supabase chamam esta API e não precisam da chave.
 
 ## Limitações
 
