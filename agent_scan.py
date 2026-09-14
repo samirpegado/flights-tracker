@@ -81,8 +81,8 @@ def _flight_to_dict(flight) -> dict[str, Any]:
             {
                 "airline": leg.airline.value,
                 "flight_number": leg.flight_number,
-                "departure_airport": leg.departure_airport.value,
-                "arrival_airport": leg.arrival_airport.value,
+                "departure_airport": leg.departure_airport.name,
+                "arrival_airport": leg.arrival_airport.name,
                 "departure_datetime": leg.departure_datetime.isoformat(),
                 "arrival_datetime": leg.arrival_datetime.isoformat(),
                 "duration_minutes": leg.duration,
