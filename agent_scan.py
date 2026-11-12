@@ -168,7 +168,10 @@ def search_calendar(
     return dates
 
 
-def _sample_dates(start: datetime, end: datetime, step: int = 2) -> list[str]:
+def _sample_dates(start: datetime, end: datetime, step: int | None = None) -> list[str]:
+    span = max((end - start).days, 0)
+    if step is None:
+        step = 1 if span <= 10 else 2
     dates = []
     current = start
     while current <= end:
@@ -177,6 +180,17 @@ def _sample_dates(start: datetime, end: datetime, step: int = 2) -> list[str]:
     if end.strftime("%Y-%m-%d") not in dates:
         dates.append(end.strftime("%Y-%m-%d"))
     return dates
+
+
+def _duration_matches(nights: int, duration_min: int, duration_max: int) -> bool:
+    """Aceita noites (volta − ida) ou dias corridos inclusivos (13 a 17 = 5 dias)."""
+    if nights < 0:
+        return False
+    inclusive = nights + 1
+    return (
+        duration_min <= nights <= duration_max
+        or duration_min <= inclusive <= duration_max
+    )
 
 
 def _valid_pairs(
@@ -192,10 +206,16 @@ def _valid_pairs(
         d0 = datetime.strptime(depart, "%Y-%m-%d")
         for back in return_dates:
             d1 = datetime.strptime(back, "%Y-%m-%d")
-            stay = (d1 - d0).days
-            if duration_min <= stay <= duration_max:
+            nights = (d1 - d0).days
+            if _duration_matches(nights, duration_min, duration_max):
                 total = price_by_out.get(depart, 9_999_999) + price_by_ret.get(back, 9_999_999)
                 pairs.append((depart, back, total))
+    if not pairs and outbound_dates and return_dates:
+        first = min(outbound_dates)
+        last = max(return_dates)
+        if last >= first:
+            total = price_by_out.get(first, 9_999_999) + price_by_ret.get(last, 9_999_999)
+            pairs.append((first, last, total))
     pairs.sort(key=lambda item: item[2])
     return pairs[:TOP_DATE_PAIRS]
 
